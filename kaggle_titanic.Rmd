@@ -1,0 +1,14 @@
+---
+title: 'Kaggle competition "Titanic: Machine Learning from Disaster"'
+author: "Konstantin Greger"
+date: "Thursday, May 21, 2015"
+output: html_document
+---
+
+## Loading the data
+
+I followed Curt's approach of loading the CSV files from my GitHub repo, but instead of his self-developed function based on `read.csv` I decided to use Hadley Wickham's [`readr`package](https://github.com/hadley/readr).
+
+```{r}
+library(readr)
+```
