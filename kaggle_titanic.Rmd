@@ -7,8 +7,351 @@ output: html_document
 
 ## Loading the data
 
-I followed Curt's approach of loading the CSV files from my GitHub repo, but instead of his self-developed function based on `read.csv` I decided to use Hadley Wickham's [`readr`package](https://github.com/hadley/readr).
+I followed [Curt's](https://github.com/wehrley/wehrley.github.io/blob/master/SOUPTONUTS.md) approach of loading the CSV files from my GitHub repo, but instead of his self-developed function based on `read.csv` I decided to use Hadley Wickham's [`readr`package](https://github.com/hadley/readr).
 
 ```{r}
-library(readr)
+suppressMessages(library(Hmisc))
+suppressMessages(library(plyr))
+suppressMessages(library(dplyr))
+suppressMessages(library(readr))
+suppressMessages(library(reshape2))
+suppressMessages(library(stringr))
+suppressMessages(library(vcd))
+
+path <- "https://raw.github.com/kogreger/kaggle_titanic/master/"
+trainFile <- "train.csv"
+testFile <- "test.csv"
+
+train <- read_csv(paste0(path, trainFile), col_types = list(
+    PassengerId = col_integer(), 
+    Survived = col_factor(c("0", "1")), 
+    Pclass = col_factor(c("1", "2", "3")), 
+    Name = col_character(), 
+    Sex = col_factor(c("male", "female")), 
+    Age = col_double(), 
+    SibSp = col_integer(), 
+    Parch = col_integer(), 
+    Ticket = col_character(), 
+    Fare = col_numeric(), 
+    Cabin = col_character(), 
+    Embarked = col_factor(c("C", "Q", "S")))) %>% 
+    tbl_df()
+test <- read_csv(paste0(path, testFile), col_types = list(
+    PassengerId = col_integer(), 
+    Pclass = col_factor(c("1", "2", "3")), 
+    Name = col_character(), 
+    Sex = col_factor(c("male", "female")), 
+    Age = col_double(), 
+    SibSp = col_integer(), 
+    Parch = col_integer(), 
+    Ticket = col_character(), 
+    Fare = col_numeric(), 
+    Cabin = col_character(), 
+    Embarked = col_factor(c("C", "Q", "S")))) %>% 
+    tbl_df()
+
+train
+test
 ```
+
+## Processing the data (a.k.a. "data munging")
+
+I like the idea of visualizing the missing values to get an idea of the situation, but again I used a different method to do so, using `image`:
+
+```{r}
+image(is.na(train), 
+      main = "Missing Values", 
+      xlab = "Observation", 
+      ylab = "Variable", 
+      xaxt = "n", 
+      yaxt = "n", 
+      bty = "n")
+axis(1, seq(0, 1, length.out = nrow(train)), 1:nrow(train), col = "white")
+axis(2, seq(0, 1, length.out = length(train)), names(train), col = "white", las = 2)
+```
+
+This is a picture dramatically different from the situation that Curt encountered with his data loading scheme. Since I don't care about the cabin numbers for now I don't regard empty fields here as missing data.
+
+Next was some general descriptive statistics on the various attributes of the data:
+
+```{r}
+barplot(table(train$Survived),
+        names.arg = c("perished", "survived"),
+        main = "Survived (passenger fate)", 
+        col = "black")
+barplot(table(train$Pclass), 
+        names.arg = c("1st", "2nd", "3rd"),
+        main = "Pclass (passenger traveling class)", 
+        col = "black")
+barplot(table(train$Sex), 
+        main = "Sex (gender)", 
+        col = "black")
+hist(train$Age, 
+     main = "Age", 
+     xlab = NULL, 
+     col = "black")
+barplot(table(train$SibSp), 
+        main = "SibSp (siblings + spouse aboard)", 
+        col = "black")
+barplot(table(train$Parch), 
+        main = "Parch (parents + kids aboard)", 
+        col = "black")
+hist(train$Fare, 
+     main = "Fare (fee paid for ticket[s])", 
+     xlab = NULL, 
+     col = "black")
+barplot(table(train$Embarked), 
+        names.arg = c("Cherbourg", "Queenstown", "Southampton"),
+        main = "Embarked (port of embarkation)", 
+        col = "black")
+```
+
+While some interesting trends are visible (more men than women, more 3rd class passengers than 1st and 2nd class, mostly younger people, almost everybody embarked in Southampton, ...) it only becomes interesting to look at the data from a multivariate perspective. Just like Curt I escpecially like mosaic plots for this purpose:
+
+```{r}
+mosaicplot(train$Pclass ~ train$Survived, 
+           main="Passenger Fate by Traveling Class", 
+           shade = FALSE, 
+           color = TRUE, 
+           xlab = "Pclass", 
+           ylab = "Survived")
+mosaicplot(train$Sex ~ train$Survived, 
+           main = "Passenger Fate by Gender", 
+           shade = FALSE, 
+           color = TRUE, 
+           xlab = "Sex", 
+           ylab = "Survived")
+```
+
+These two plots are hinting at two of the (probably) most important factors for our model: gender and class. It seems as if especially men and 3rd class passengers had a significantly lower survival rate than their female and/or upper-class counterparts.
+
+Age on the other hand did not seem to be a factor for survival, although more older people seem to have perished:
+
+```{r}
+boxplot(train$Age ~ train$Survived, 
+        main = "Passenger Fate by Age",
+        xlab = "Survived", 
+        ylab = "Age")
+```
+
+it is not clear, though, if this was due to the fact that they didnt make it to teh rescue boats in time or were overpowered by younger passengers, or whether it was a conscious choice in order to allow younger people to be rescued.
+
+## Treating missing values
+
+### Age
+
+We have `r sum(is.na(train$Age))` missing values in our age variable. At `r nrow(train)` samples this actually accounts to `r round(sum(is.na(train$Age)) / nrow(train) * 100, 1)`% missing. Therefore simple imputation by the mean value (`r round(mean(train$Age, na.rm = TRUE), 1)` in this case) will not produce meaningful input data for our model.
+
+#### Attempt 1: Age derived from passenger class
+
+Compared to the age of passengers who perished vs. survived it appears to be a lot more informative to look at the age distributions by class:
+
+```{r}
+boxplot(train$Age ~ train$Pclass, 
+        main = "Passenger Traveling Class by Age",
+        xlab = "Pclass", 
+        ylab = "Age")
+```
+
+So an average age can be imputed from the traveling class of each passenger as follows:
+
+```{r}
+train <- train %>% 
+    group_by(Pclass) %>% 
+    mutate(AgePclass = mean(Age, na.rm = TRUE))
+
+train %>% 
+    group_by(Pclass) %>% 
+    summarise(n = n(), 
+              missing = sum(is.na(Age)), 
+              mean = mean(Age, na.rm = TRUE), 
+              median = median(Age, na.rm = TRUE))
+```
+
+#### Attempt 2: Age derived from titles in names
+
+Another attempt suggested by Curt is to make use ot the titles provided for all passengers in their name field. For this purpose he developed a function to extract the title, which I simply reuse here in a single vectorized statement:
+
+```{r}
+# process for extracting honorific (i.e. title) from the Name feature taken
+# from https://github.com/wehrley/wehrley.github.io/blob/master/SOUPTONUTS.md
+train$Title <- substr(train$Name, 
+                      regexpr("\\,[A-Z ]{1,20}\\.", 
+                              train$Name, 
+                              TRUE) + 2, 
+                      regexpr("\\,[A-Z ]{1,20}\\.", 
+                              train$Name, 
+                              TRUE) + 
+                          attr(regexpr("\\,[A-Z ]{1,20}\\.", 
+                                       train$Name, 
+                                       TRUE), 
+                               "match.length") - 2)
+train <- train %>% 
+    group_by(Title) %>% 
+    mutate(AgeTitle = mean(Age, na.rm = TRUE))
+
+train %>% 
+    group_by(Title) %>% 
+    summarise(n = n(), 
+              missing = sum(is.na(Age)), 
+              mean = mean(Age, na.rm = TRUE), 
+              median = median(Age, na.rm = TRUE))
+```
+
+#### Comparison of attempts
+
+Using the non-missing ages we can compare the two imputation approaches (1: by passenger class, 2: by titles in names) to decide which one to use in our upcoming modeling.
+
+```{r}
+comparison <- train %>% 
+    ungroup() %>% 
+    filter(!is.na(Age)) %>% 
+    mutate(diffAgePclass = Age - AgePclass, 
+           diffAgeTitle = Age - AgeTitle) %>% 
+    select(PassengerId, diffAgePclass, diffAgeTitle) %>% 
+    melt(id.vars = c("PassengerId"), 
+         measure.vars = c("diffAgePclass", "diffAgeTitle")) %>% 
+    select(value, variable)
+
+boxplot(comparison$value ~ comparison$variable, 
+        main = "Comparison of Passenger Age Imputation Methods",
+        xlab = "Method", 
+        ylab = "Difference")
+```
+
+This analysis shows that both imputation methods introduce some variation, but overall the second, more complex, method involving the passengers titles seems to perform slightly better. Hence I decided to follow Curt and use this method to impute the missing ages.
+
+#### Actual imputation
+
+For performing the imputation of missing ages I reuse Curt's ideas but rewrote them partially using the `dplyr` syntax:
+
+```{r}
+titlesToImpute <- train %>% 
+    group_by(Title) %>% 
+    summarise(missing = sum(is.na(Age))) %>% 
+    filter(missing > 0) %>% 
+    select(Title) %>% 
+    collect %>% 
+    .[["Title"]]
+
+# function for imputing missing age information for certain passengers taken
+# from https://github.com/wehrley/wehrley.github.io/blob/master/SOUPTONUTS.md
+imputeMedian <- function(impute.var, filter.var, var.levels) {
+    for(v in var.levels) {
+    impute.var[which(filter.var == v)] <- 
+        impute(impute.var[which(filter.var == v)])
+    }
+    return(impute.var)
+}
+
+train$Age <- imputeMedian(train$Age, 
+                          train$Title, 
+                          titlesToImpute)
+```
+
+### Embarkation port
+
+Since only `r sum(is.na(train$Embarked))` samples are missing information on their port of embarkation I assumed it reasonable to assign them to the majority of people who embarked in Southampton:
+
+```{r}
+round(prop.table(table(train$Embarked)) * 100, 1)
+
+train$Embarked[which(is.na(train$Embarked))] <- 'S'
+```
+
+### Fare
+
+There are no missing values for the ticket fares, but a number of null values:
+
+```{r}
+train %>% 
+    filter(Fare == 0) %>% 
+    select(PassengerId, Name, Age, Fare)
+```
+
+If we assume these to be missing values we can easily impute ticket fares by reusing the `imputeMedian` function we formulated above:
+
+```{r}
+train$Fare[which(train$Fare == 0 )] <- NA
+train$Fare <- imputeMedian(train$Fare, 
+                           train$Pclass, 
+                           as.numeric(levels(train$Pclass)))
+```
+
+## Feature Engineering
+
+### Title 
+
+Curt then goes on to suggest engineering a new variable to respresent the social status of each passenger, derived from the aforementioned title attribute. It is easily visible that the ages of the passengers vary greatly by their title, and that the titles can be put in a certain descending order of social class and be grouped accordingly:
+
+```{r}
+train$Title <- factor(train$Title,
+                      c("Capt", "Col", "Major", "Sir", "Lady", "Rev", "Dr", 
+                        "Don", "Jonkheer", "the Countess" ,"Mrs", "Ms", "Mr", 
+                        "Mme", "Mlle", "Miss", "Master"))
+
+boxplot(train$Age ~ train$Title, 
+        main = "Passenger Age by Title", 
+        xlab = "Title", 
+        ylab = "Age")
+
+train$Title <- as.character(train$Title)
+train$Title[which(train$Title %in% c("Capt", "Col", "Don", "Dr", "Jonkheer", 
+                                     "Lady", "Major", "Rev", "Sir"))] <- "Noble"
+train$Title[which(train$Title %in% c("the Countess", "Ms"))] <- "Mrs"
+train$Title[which(train$Title %in% c("Mlle", "Mme"))] <- "Miss"
+train$Title <- as.factor(train$Title)
+```
+
+### Other variables
+
+Curt also renamed and generated a host of other variables for use in the model:
+
+```{r}
+## test a character as an EVEN single digit
+isEven <- function(x) x %in% c("0","2","4","6","8") 
+## test a character as an ODD single digit
+isOdd <- function(x) x %in% c("1","3","5","7","9") 
+
+## function to add features to training or test data frames
+featureEngrg <- function(data) {
+  ## Using Fate ILO Survived because term is shorter and just sounds good
+  data$Fate <- data$Survived
+  ## Revaluing Fate factor to ease assessment of confusion matrices later
+  data$Fate <- revalue(data$Fate, c("1" = "Survived", "0" = "Perished"))
+  ## Boat.dibs attempts to capture the "women and children first"
+  ## policy in one feature.  Assuming all females plus males under 15
+  ## got "dibs' on access to a lifeboat
+  data$Boat.dibs <- "No"
+  data$Boat.dibs[which(data$Sex == "female" | data$Age < 15)] <- "Yes"
+  data$Boat.dibs <- as.factor(data$Boat.dibs)
+  ## Family consolidates siblings and spouses (SibSp) plus
+  ## parents and children (Parch) into one feature
+  data$Family <- data$SibSp + data$Parch
+  ## Fare.pp attempts to adjust group purchases by size of family
+  data$Fare.pp <- data$Fare/(data$Family + 1)
+  ## Giving the traveling class feature a new look
+  data$Class <- data$Pclass
+  data$Class <- revalue(data$Class, 
+                        c("1"="First", "2"="Second", "3"="Third"))
+  ## First character in Cabin number represents the Deck 
+  data$Deck <- substring(data$Cabin, 1, 1)
+  data$Deck[ which( is.na(data$Deck ))] <- "UNK"
+  data$Deck <- as.factor(data$Deck)
+  ## Odd-numbered cabins were reportedly on the port side of the ship
+  ## Even-numbered cabins assigned Side="starboard"
+  data$cabin.last.digit <- str_sub(data$Cabin, -1)
+  data$Side <- "UNK"
+  data$Side[which(isEven(data$cabin.last.digit))] <- "port"
+  data$Side[which(isOdd(data$cabin.last.digit))] <- "starboard"
+  data$Side <- as.factor(data$Side)
+  data$cabin.last.digit <- NULL
+  return (data)
+}
+
+## add remaining features to training data frame
+train <- featureEngrg(train) %>% 
+    select(Fate, Sex, Boat.dibs, Age, Title, Class, Deck, Side, Fare, Fare.pp, 
+           Embarked, Family)
+```
+
