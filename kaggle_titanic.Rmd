@@ -383,7 +383,7 @@ model1 <- glm(Fate ~ Sex + Class + Age + Family + Embarked + Fare,
               family = binomial("logit"))
 ```
 
-Compared to a null-deviance of `r round(model1$null.deviance, 0)` our model reduced the deviance to `r round(model1$deviance, 0)`, quite an improvement for a first shot. The number of `r df.null - df.residual` degrees of freedom stems from the categorical variables `Sex` (2 classes), `Class` (3 classes), and `Embarked` (3 classes).
+Compared to a null-deviance of `r round(model1$null.deviance, 0)` our model reduced the deviance to `r round(model1$deviance, 0)`, quite an improvement for a first shot. The number of `r model1$df.null - model1$df.residual` degrees of freedom stems from the categorical variables `Sex` (2 classes), `Class` (3 classes), and `Embarked` (3 classes).
 
 Now let's see if we can improve the logit model by removing some of these parameters. ANOVA is a good way to do this, since it reveals how strong each parameter is involved in the prediction of our outcome class (i.e. reduction in deviance from the random null-model):
 

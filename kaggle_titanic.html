@@ -70,9 +70,12 @@ img {
 <div id="loading-the-data" class="section level2">
 <h2>Loading the data</h2>
 <p>I followed <a href="https://github.com/wehrley/wehrley.github.io/blob/master/SOUPTONUTS.md">Curt’s</a> approach of loading the CSV files from my GitHub repo, but instead of his self-developed function based on <code>read.csv</code> I decided to use Hadley Wickham’s <a href="https://github.com/hadley/readr"><code>readr</code>package</a>.</p>
-<pre class="r"><code>suppressMessages(library(Hmisc))
+<pre class="r"><code>suppressMessages(library(caret))
+suppressMessages(library(e1071))
+suppressMessages(library(Hmisc))
 suppressMessages(library(plyr))
 suppressMessages(library(dplyr))
+suppressMessages(library(pROC))
 suppressMessages(library(readr))
 suppressMessages(library(reshape2))
 suppressMessages(library(stringr))
@@ -335,7 +338,7 @@ boxplot(comparison$value ~ comparison$variable,
 imputeMedian &lt;- function(impute.var, filter.var, var.levels) {
     for(v in var.levels) {
     impute.var[which(filter.var == v)] &lt;- 
-        impute(impute.var[which(filter.var == v)])
+        Hmisc::impute(impute.var[which(filter.var == v)])
     }
     return(impute.var)
 }
@@ -457,6 +460,289 @@ train &lt;- featureEngrg(train) %&gt;%
     select(Fate, Sex, Boat.dibs, Age, Title, Class, Deck, Side, Fare, Fare.pp, 
            Embarked, Family)</code></pre>
 </div>
+</div>
+<div id="fitting-a-model" class="section level2">
+<h2>Fitting a model</h2>
+<div id="splitting-the-data" class="section level3">
+<h3>Splitting the data</h3>
+<p>In order to be able to fit and validate our models we need a (true) training dataset and a validation dataset, here an 80/20-split:</p>
+<pre class="r"><code>set.seed(23)
+training.rows &lt;- createDataPartition(train$Fate, 
+                                     p = 0.8, 
+                                     list = FALSE)
+train.batch &lt;- train[training.rows, ]
+test.batch &lt;- train[-training.rows, ]</code></pre>
+</div>
+<div id="simple-linear-regression" class="section level3">
+<h3>Simple linear regression</h3>
+<p>Since it’s simple and sturdy, our first attempt at modeling has to be a linear regression with six basic parameters:</p>
+<pre class="r"><code>model1 &lt;- glm(Fate ~ Sex + Class + Age + Family + Embarked + Fare, 
+              data = train.batch, 
+              family = binomial(&quot;logit&quot;))</code></pre>
+<p>Compared to a null-deviance of 951 our model reduced the deviance to 631, quite an improvement for a first shot. The number of 8 degrees of freedom stems from the categorical variables <code>Sex</code> (2 classes), <code>Class</code> (3 classes), and <code>Embarked</code> (3 classes).</p>
+<p>Now let’s see if we can improve the logit model by removing some of these parameters. ANOVA is a good way to do this, since it reveals how strong each parameter is involved in the prediction of our outcome class (i.e. reduction in deviance from the random null-model):</p>
+<pre class="r"><code>anova(model1, test=&quot;Chisq&quot;)</code></pre>
+<pre><code>## Analysis of Deviance Table
+## 
+## Model: binomial, link: logit
+## 
+## Response: Fate
+## 
+## Terms added sequentially (first to last)
+## 
+## 
+##          Df Deviance Resid. Df Resid. Dev  Pr(&gt;Chi)    
+## NULL                       713     950.86              
+## Sex       1  202.688       712     748.18 &lt; 2.2e-16 ***
+## Class     2   76.110       710     672.07 &lt; 2.2e-16 ***
+## Age       1   23.707       709     648.36 1.122e-06 ***
+## Family    1   11.367       708     636.99 0.0007474 ***
+## Embarked  2    5.482       706     631.51 0.0645202 .  
+## Fare      1    0.495       705     631.02 0.4818720    
+## ---
+## Signif. codes:  0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1</code></pre>
+<p>As expected (or shown by our descriptive analyses above), sex and traveling class of the passengers had great influence on whether or not they survived. In contrast, the fare and embarkation port do not seem to have to much influence. Let’s try to fix the former by employing the per-person fare we calculated earlier:</p>
+<pre class="r"><code>model2 &lt;- glm(Fate ~ Sex + Class + Age + Family + Embarked + Fare.pp, 
+              data = train.batch, 
+              family = binomial(&quot;logit&quot;))
+anova(model2, test=&quot;Chisq&quot;)</code></pre>
+<pre><code>## Analysis of Deviance Table
+## 
+## Model: binomial, link: logit
+## 
+## Response: Fate
+## 
+## Terms added sequentially (first to last)
+## 
+## 
+##          Df Deviance Resid. Df Resid. Dev  Pr(&gt;Chi)    
+## NULL                       713     950.86              
+## Sex       1  202.688       712     748.18 &lt; 2.2e-16 ***
+## Class     2   76.110       710     672.07 &lt; 2.2e-16 ***
+## Age       1   23.707       709     648.36 1.122e-06 ***
+## Family    1   11.367       708     636.99 0.0007474 ***
+## Embarked  2    5.482       706     631.51 0.0645202 .  
+## Fare.pp   1    0.274       705     631.24 0.6008925    
+## ---
+## Signif. codes:  0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1</code></pre>
+<p>Now that didn’t help at all, the deviance for <code>Fare.pp</code> is even lower than <code>Fare</code>’s! So let’s throw it out altogether:</p>
+<pre class="r"><code>model3 &lt;- glm(Fate ~ Sex + Class + Age + Family + Embarked, 
+              data = train.batch, 
+              family = binomial(&quot;logit&quot;))
+anova(model3, test=&quot;Chisq&quot;)</code></pre>
+<pre><code>## Analysis of Deviance Table
+## 
+## Model: binomial, link: logit
+## 
+## Response: Fate
+## 
+## Terms added sequentially (first to last)
+## 
+## 
+##          Df Deviance Resid. Df Resid. Dev  Pr(&gt;Chi)    
+## NULL                       713     950.86              
+## Sex       1  202.688       712     748.18 &lt; 2.2e-16 ***
+## Class     2   76.110       710     672.07 &lt; 2.2e-16 ***
+## Age       1   23.707       709     648.36 1.122e-06 ***
+## Family    1   11.367       708     636.99 0.0007474 ***
+## Embarked  2    5.482       706     631.51 0.0645202 .  
+## ---
+## Signif. codes:  0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1</code></pre>
+</div>
+<div id="fold-cross-validated-logistic-regression" class="section level3">
+<h3>10-fold cross-validated logistic regression</h3>
+<p>In order to be able to compare the performance of our model to other, more involved modeling techniques we will employ the <code>caret</code> package, and initialize an appropriate control function. This will allow us to plot the ROC curves later and pick the best-performing model.</p>
+<pre class="r"><code>cv.ctrl &lt;- trainControl(method = &quot;repeatedcv&quot;, 
+                        repeats = 3,
+                        summaryFunction = twoClassSummary, 
+                        classProbs = TRUE)</code></pre>
+<p>And run the last linear regression model we fitted above:</p>
+<pre class="r"><code>set.seed(35)
+model4 &lt;- train(Fate ~ Sex + Class + Age + Family + Embarked, 
+                data = train.batch, 
+                method = &quot;glm&quot;, 
+                metric = &quot;ROC&quot;, 
+                trControl = cv.ctrl)
+summary(model4)</code></pre>
+<pre><code>## 
+## Call:
+## NULL
+## 
+## Deviance Residuals: 
+##     Min       1Q   Median       3Q      Max  
+## -2.2185  -0.6152  -0.4226   0.6375   2.4717  
+## 
+## Coefficients:
+##             Estimate Std. Error z value Pr(&gt;|z|)    
+## (Intercept)  2.00108    0.43066   4.647 3.37e-06 ***
+## Sexfemale    2.64146    0.22237  11.879  &lt; 2e-16 ***
+## ClassSecond -1.24511    0.30481  -4.085 4.41e-05 ***
+## ClassThird  -2.43879    0.28496  -8.558  &lt; 2e-16 ***
+## Age         -0.04542    0.00882  -5.149 2.61e-07 ***
+## Family      -0.21021    0.07263  -2.894   0.0038 ** 
+## EmbarkedQ   -0.12801    0.41992  -0.305   0.7605    
+## EmbarkedS   -0.57039    0.26374  -2.163   0.0306 *  
+## ---
+## Signif. codes:  0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1
+## 
+## (Dispersion parameter for binomial family taken to be 1)
+## 
+##     Null deviance: 950.86  on 713  degrees of freedom
+## Residual deviance: 631.51  on 706  degrees of freedom
+## AIC: 647.51
+## 
+## Number of Fisher Scoring iterations: 5</code></pre>
+<p>Still a deviance of 632. Curt suggested to introduce a compressed factor from the <code>Embarked</code> variable like this:</p>
+<pre class="r"><code>set.seed(35)
+model5 &lt;- train(Fate ~ Sex + Class + Age + Family + I(Embarked == &quot;S&quot;), 
+                data = train.batch, 
+                method = &quot;glm&quot;, 
+                metric = &quot;ROC&quot;, 
+                trControl = cv.ctrl)
+summary(model5)</code></pre>
+<pre><code>## 
+## Call:
+## NULL
+## 
+## Deviance Residuals: 
+##     Min       1Q   Median       3Q      Max  
+## -2.2050  -0.6164  -0.4208   0.6426   2.4755  
+## 
+## Coefficients:
+##                           Estimate Std. Error z value Pr(&gt;|z|)    
+## (Intercept)               1.974766   0.421336   4.687 2.77e-06 ***
+## Sexfemale                 2.637404   0.221797  11.891  &lt; 2e-16 ***
+## ClassSecond              -1.255287   0.302867  -4.145 3.40e-05 ***
+## ClassThird               -2.460789   0.275768  -8.923  &lt; 2e-16 ***
+## Age                      -0.045467   0.008811  -5.160 2.47e-07 ***
+## Family                   -0.208482   0.072311  -2.883  0.00394 ** 
+## `I(Embarked == &quot;S&quot;)TRUE` -0.529630   0.227416  -2.329  0.01986 *  
+## ---
+## Signif. codes:  0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1
+## 
+## (Dispersion parameter for binomial family taken to be 1)
+## 
+##     Null deviance: 950.86  on 713  degrees of freedom
+## Residual deviance: 631.60  on 707  degrees of freedom
+## AIC: 645.6
+## 
+## Number of Fisher Scoring iterations: 5</code></pre>
+<p>That didn’t help in terms of model prediction, but the statistical signifincance of <code>Embarked</code> got bumped up to the 0.05-level.</p>
+<p>Since we put so much effortinto it, let’s include out <code>Title</code> factor in the model:</p>
+<pre class="r"><code>set.seed(35)
+model6 &lt;- train(Fate ~ Sex + Class + Title + Age + Family + I(Embarked==&quot;S&quot;), 
+                data = train.batch, 
+                method = &quot;glm&quot;, 
+                metric = &quot;ROC&quot;, 
+                trControl = cv.ctrl)
+summary(model6)</code></pre>
+<pre><code>## 
+## Call:
+## NULL
+## 
+## Deviance Residuals: 
+##     Min       1Q   Median       3Q      Max  
+## -2.3476  -0.5765  -0.3877   0.5734   2.4953  
+## 
+## Coefficients:
+##                           Estimate Std. Error z value Pr(&gt;|z|)    
+## (Intercept)                4.70447    0.65161   7.220 5.21e-13 ***
+## Sexfemale                 15.28525  623.55543   0.025 0.980443    
+## ClassSecond               -1.43867    0.33135  -4.342 1.41e-05 ***
+## ClassThird                -2.54556    0.29641  -8.588  &lt; 2e-16 ***
+## TitleMiss                -15.57857  623.55565  -0.025 0.980068    
+## TitleMr                   -3.04656    0.57156  -5.330 9.81e-08 ***
+## TitleMrs                 -14.53106  623.55571  -0.023 0.981408    
+## TitleNoble                -3.13799    0.82733  -3.793 0.000149 ***
+## Age                       -0.03695    0.01065  -3.471 0.000518 ***
+## Family                    -0.43025    0.08915  -4.826 1.39e-06 ***
+## `I(Embarked == &quot;S&quot;)TRUE`  -0.55423    0.23509  -2.358 0.018395 *  
+## ---
+## Signif. codes:  0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1
+## 
+## (Dispersion parameter for binomial family taken to be 1)
+## 
+##     Null deviance: 950.86  on 713  degrees of freedom
+## Residual deviance: 588.32  on 703  degrees of freedom
+## AIC: 610.32
+## 
+## Number of Fisher Scoring iterations: 13</code></pre>
+<p>Well well, another success regarding our model deviance measure, which is now at 588.</p>
+</div>
+</div>
+<div id="evaluating-a-model" class="section level2">
+<h2>Evaluating a model</h2>
+<p>Now let’s see how well our model, which we trained on the true training dataset, performs on our training or validation dataset (remember: the kaggle competition tiself contains a training and a test dataset!).</p>
+<pre class="r"><code>glm.pred &lt;- predict(model6, test.batch)
+confMat &lt;- confusionMatrix(glm.pred, test.batch$Fate)</code></pre>
+<p>That looks promising, with an overall prediction accuracy of 85.3%. The sensitivity, in our case that’s the correct prediction of survival, is at 87.2%, the sepcificity, in our case the correct prediction of non-survival, is at 82.4%.</p>
+<p>And here’s the ROC curve for our logistic regression model:</p>
+<pre class="r"><code>glm.probs &lt;- predict(model6, 
+                     test.batch, 
+                     type = &quot;prob&quot;)
+glm.ROC &lt;- roc(response = test.batch$Fate, 
+               predictor = glm.probs$Survived, 
+               levels = levels(test.batch$Fate))
+plot(glm.ROC, type = &quot;S&quot;)</code></pre>
+<p><img src="data:image/png;base64,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" title alt width="672" /></p>
+<pre><code>## 
+## Call:
+## roc.default(response = test.batch$Fate, predictor = glm.probs$Survived,     levels = levels(test.batch$Fate))
+## 
+## Data: glm.probs$Survived in 109 controls (test.batch$Fate Perished) &lt; 68 cases (test.batch$Fate Survived).
+## Area under the curve: 0.8862</code></pre>
+</div>
+<div id="submitting-a-model-to-kaggle" class="section level2">
+<h2>Submitting a model to kaggle</h2>
+<p>Now’s the time to finish up: Let’s apply all our data-munging to the test data that was provided as part of the kaggle competition first:</p>
+<pre class="r"><code>test$Title &lt;- substr(test$Name, 
+                      regexpr(&quot;\\,[A-Z ]{1,20}\\.&quot;, 
+                              test$Name, 
+                              TRUE) + 2, 
+                      regexpr(&quot;\\,[A-Z ]{1,20}\\.&quot;, 
+                              test$Name, 
+                              TRUE) + 
+                          attr(regexpr(&quot;\\,[A-Z ]{1,20}\\.&quot;, 
+                                       test$Name, 
+                                       TRUE), 
+                               &quot;match.length&quot;) - 2)
+test$Title[which(test$Title %in% c(&quot;Dona&quot;, &quot;Ms&quot;))] &lt;- &quot;Mrs&quot;
+titlesToImpute &lt;- test %&gt;% 
+    group_by(Title) %&gt;% 
+    summarise(missing = sum(is.na(Age))) %&gt;% 
+    filter(missing &gt; 0) %&gt;% 
+    select(Title) %&gt;% 
+    collect %&gt;% 
+    .[[&quot;Title&quot;]]
+test$Age &lt;- imputeMedian(test$Age, 
+                         test$Title, 
+                         titlesToImpute)
+
+test$Title[which(test$Title %in% c(&quot;Col&quot;, &quot;Dr&quot;, &quot;Rev&quot;))] &lt;- &quot;Noble&quot;
+test$Title[which(test$Title %in% c(&quot;Mlle&quot;, &quot;Mme&quot;))] &lt;- &quot;Miss&quot;
+test$Title &lt;- as.factor(test$Title)
+
+test$Fare[which(test$Fare == 0 )] &lt;- NA
+test$Fare &lt;- imputeMedian(test$Fare, 
+                          test$Pclass, 
+                          as.numeric(levels(test$Pclass)))
+
+test &lt;- featureEngrg(test) %&gt;% 
+    select(PassengerId, Sex, Boat.dibs, Age, Title, Class, Deck, Side, Fare, Fare.pp, 
+           Embarked, Family)</code></pre>
+<pre><code>## The following `from` values were not present in `x`: 1, 0</code></pre>
+<p>And then let’s use our model to predict the survivors from the test dataset:</p>
+<pre class="r"><code>Survived &lt;- predict(model6, newdata = test)
+Survived &lt;- revalue(Survived, c(&quot;Survived&quot; = 1, &quot;Perished&quot; = 0))
+predictions &lt;- as.data.frame(Survived)
+predictions$PassengerId &lt;- test$PassengerId</code></pre>
+<p>Finally let’s write our predictions to a CSV file which we can then submit to kaggle competition:</p>
+<pre class="r"><code>write.csv(predictions[, c(&quot;PassengerId&quot;, &quot;Survived&quot;)], 
+          file=&quot;predictions.csv&quot;, 
+          row.names=FALSE, 
+          quote=FALSE)</code></pre>
+<p>This attempt scored me 0.77990 points on the public leaderboard, on 1470th position… ;o) There’s definitely room for improvment here!</p>
+<p>//kg</p>
 </div>
 
 
