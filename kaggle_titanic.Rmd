@@ -10,9 +10,12 @@ output: html_document
 I followed [Curt's](https://github.com/wehrley/wehrley.github.io/blob/master/SOUPTONUTS.md) approach of loading the CSV files from my GitHub repo, but instead of his self-developed function based on `read.csv` I decided to use Hadley Wickham's [`readr`package](https://github.com/hadley/readr).
 
 ```{r}
+suppressMessages(library(caret))
+suppressMessages(library(e1071))
 suppressMessages(library(Hmisc))
 suppressMessages(library(plyr))
 suppressMessages(library(dplyr))
+suppressMessages(library(pROC))
 suppressMessages(library(readr))
 suppressMessages(library(reshape2))
 suppressMessages(library(stringr))
@@ -239,7 +242,7 @@ titlesToImpute <- train %>%
 imputeMedian <- function(impute.var, filter.var, var.levels) {
     for(v in var.levels) {
     impute.var[which(filter.var == v)] <- 
-        impute(impute.var[which(filter.var == v)])
+        Hmisc::impute(impute.var[which(filter.var == v)])
     }
     return(impute.var)
 }
@@ -355,3 +358,191 @@ train <- featureEngrg(train) %>%
            Embarked, Family)
 ```
 
+## Fitting a model
+
+### Splitting the data
+
+In order to be able to fit and validate our models we need a (true) training dataset and a validation dataset, here an 80/20-split:
+
+```{r}
+set.seed(23)
+training.rows <- createDataPartition(train$Fate, 
+                                     p = 0.8, 
+                                     list = FALSE)
+train.batch <- train[training.rows, ]
+test.batch <- train[-training.rows, ]
+```
+
+### Simple linear regression
+
+Since it's simple and sturdy, our first attempt at modeling has to be a linear regression with six basic parameters:
+
+```{r}
+model1 <- glm(Fate ~ Sex + Class + Age + Family + Embarked + Fare, 
+              data = train.batch, 
+              family = binomial("logit"))
+```
+
+Compared to a null-deviance of `r round(model1$null.deviance, 0)` our model reduced the deviance to `r round(model1$deviance, 0)`, quite an improvement for a first shot. The number of `r df.null - df.residual` degrees of freedom stems from the categorical variables `Sex` (2 classes), `Class` (3 classes), and `Embarked` (3 classes).
+
+Now let's see if we can improve the logit model by removing some of these parameters. ANOVA is a good way to do this, since it reveals how strong each parameter is involved in the prediction of our outcome class (i.e. reduction in deviance from the random null-model):
+
+```{r}
+anova(model1, test="Chisq")
+```
+
+As expected (or shown by our descriptive analyses above), sex and traveling class of the passengers had great influence on whether or not they survived. In contrast, the fare and embarkation port do not seem to have to much influence. Let's try to fix the former by employing the per-person fare we calculated earlier:
+
+```{r}
+model2 <- glm(Fate ~ Sex + Class + Age + Family + Embarked + Fare.pp, 
+              data = train.batch, 
+              family = binomial("logit"))
+anova(model2, test="Chisq")
+```
+
+Now that didn't help at all, the deviance for `Fare.pp` is even lower than `Fare`'s! So let's throw it out altogether:
+
+```{r}
+model3 <- glm(Fate ~ Sex + Class + Age + Family + Embarked, 
+              data = train.batch, 
+              family = binomial("logit"))
+anova(model3, test="Chisq")
+```
+
+### 10-fold cross-validated logistic regression
+
+In order to be able to compare the performance of our model to other, more involved modeling techniques we will employ the `caret` package, and initialize an appropriate control function. This will allow us to plot the ROC curves later and pick the best-performing model.
+
+```{r}
+cv.ctrl <- trainControl(method = "repeatedcv", 
+                        repeats = 3,
+                        summaryFunction = twoClassSummary, 
+                        classProbs = TRUE)
+```
+
+And run the last linear regression model we fitted above:
+
+```{r}
+set.seed(35)
+model4 <- train(Fate ~ Sex + Class + Age + Family + Embarked, 
+                data = train.batch, 
+                method = "glm", 
+                metric = "ROC", 
+                trControl = cv.ctrl)
+summary(model4)
+```
+
+Still a deviance of `r round(model4$finalModel$deviance, 0)`. Curt suggested to introduce a compressed factor from the `Embarked` variable like this:
+
+```{r}
+set.seed(35)
+model5 <- train(Fate ~ Sex + Class + Age + Family + I(Embarked == "S"), 
+                data = train.batch, 
+                method = "glm", 
+                metric = "ROC", 
+                trControl = cv.ctrl)
+summary(model5)
+```
+
+That didn't help in terms of model prediction, but the statistical signifincance of `Embarked` got bumped up to the 0.05-level.
+
+Since we put so much effortinto it, let's include out `Title` factor in the model:
+
+```{r}
+set.seed(35)
+model6 <- train(Fate ~ Sex + Class + Title + Age + Family + I(Embarked=="S"), 
+                data = train.batch, 
+                method = "glm", 
+                metric = "ROC", 
+                trControl = cv.ctrl)
+summary(model6)
+```
+
+Well well, another success regarding our model deviance measure, which is now at `r round(model6$finalModel$deviance, 0)`.
+
+## Evaluating a model
+
+Now let's see how well our model, which we trained on the true training dataset, performs on our training or validation dataset (remember: the kaggle competition tiself contains a training and a test dataset!).
+
+```{r}
+glm.pred <- predict(model6, test.batch)
+confMat <- confusionMatrix(glm.pred, test.batch$Fate)
+```
+
+That looks promising, with an overall prediction accuracy of `r round(as.numeric(confMat$overall[1]) * 100, 1)`%. The sensitivity, in our case that's the correct prediction of survival, is at `r round(as.numeric(confMat$byClass[1]) * 100, 1)`%, the sepcificity, in our case the correct prediction of non-survival, is at `r round(as.numeric(confMat$byClass[2]) * 100, 1)`%.
+
+And here's the ROC curve for our logistic regression model:
+
+```{r}
+glm.probs <- predict(model6, 
+                     test.batch, 
+                     type = "prob")
+glm.ROC <- roc(response = test.batch$Fate, 
+               predictor = glm.probs$Survived, 
+               levels = levels(test.batch$Fate))
+plot(glm.ROC, type = "S")
+```
+
+## Submitting a model to kaggle
+
+Now's the time to finish up: Let's apply all our data-munging to the test data that was provided as part of the kaggle competition first:
+
+```{r}
+test$Title <- substr(test$Name, 
+                      regexpr("\\,[A-Z ]{1,20}\\.", 
+                              test$Name, 
+                              TRUE) + 2, 
+                      regexpr("\\,[A-Z ]{1,20}\\.", 
+                              test$Name, 
+                              TRUE) + 
+                          attr(regexpr("\\,[A-Z ]{1,20}\\.", 
+                                       test$Name, 
+                                       TRUE), 
+                               "match.length") - 2)
+test$Title[which(test$Title %in% c("Dona", "Ms"))] <- "Mrs"
+titlesToImpute <- test %>% 
+    group_by(Title) %>% 
+    summarise(missing = sum(is.na(Age))) %>% 
+    filter(missing > 0) %>% 
+    select(Title) %>% 
+    collect %>% 
+    .[["Title"]]
+test$Age <- imputeMedian(test$Age, 
+                         test$Title, 
+                         titlesToImpute)
+
+test$Title[which(test$Title %in% c("Col", "Dr", "Rev"))] <- "Noble"
+test$Title[which(test$Title %in% c("Mlle", "Mme"))] <- "Miss"
+test$Title <- as.factor(test$Title)
+
+test$Fare[which(test$Fare == 0 )] <- NA
+test$Fare <- imputeMedian(test$Fare, 
+                          test$Pclass, 
+                          as.numeric(levels(test$Pclass)))
+
+test <- featureEngrg(test) %>% 
+    select(PassengerId, Sex, Boat.dibs, Age, Title, Class, Deck, Side, Fare, Fare.pp, 
+           Embarked, Family)
+```
+
+And then let's use our model to predict the survivors from the test dataset:
+
+```{r}
+Survived <- predict(model6, newdata = test)
+Survived <- revalue(Survived, c("Survived" = 1, "Perished" = 0))
+predictions <- as.data.frame(Survived)
+predictions$PassengerId <- test$PassengerId
+```
+
+Finally let's write our predictions to a CSV file which we can then submit to kaggle competition:
+
+```{r}
+write.csv(predictions[, c("PassengerId", "Survived")], 
+          file="predictions.csv", 
+          row.names=FALSE, 
+          quote=FALSE)
+```
+
+This attempt scored me 0.77990 points on the public leaderboard, on 1470th position... ;o) There's definitely room for improvment here!
+
+//kg
